@@ -1,18 +1,15 @@
-name: Build SoundPhysicsLite
+name: Build SPL.levipack (arm64-v8a)
 
 on:
   push:
-    branches:
-      - main
+    branches: [main, master]
   pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build SoundPhysicsLite
+  build-arm64:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -21,93 +18,77 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build zip
+          sudo apt-get install -y cmake ninja-build file unzip
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r28c
+          add-to-path: false
 
-      - name: Install Android NDK
+      - name: Export NDK path
         run: |
-          sdkmanager "platform-tools"
-          sdkmanager "platforms;android-26"
-          sdkmanager "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          test -f "${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake"
 
-      - name: Set NDK environment
+      - name: CMake configure (arm64-v8a)
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_LATEST_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
-
-      - name: Verify project
-        run: |
-          echo "=== Project files ==="
-          find . -maxdepth 3 -type f | sort
-
-          echo "=== Checking required files ==="
-          test -f CMakeLists.txt
-          test -f manifest.json
-          test -d src
-
-          echo "Project structure OK"
-
-      - name: Verify NDK
-        run: |
-          echo "NDK = $ANDROID_NDK_HOME"
-          "$ANDROID_NDK_HOME/ndk-build" --version
-
-      - name: Configure CMake
-        run: |
-          cmake \
-            -S . \
-            -B build \
+          cmake -S . -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
-            -DANDROID=1 \
             -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-26
+            -DANDROID_PLATFORM=android-28 \
+            -DANDROID_STL=c++_shared \
+            -DLEVI_LINK_PRELOADER=ON
 
-      - name: Build
+      - name: CMake build + package
         run: |
-          cmake \
-            --build build \
-            --config Release \
-            --parallel
+          cmake --build build --parallel
+          # levi_package is ALL dependency of build if configured; ensure it runs
+          cmake --build build --target levi_package --parallel || true
 
-      - name: Package LEVIPACK
+      - name: Locate outputs
+        id: outs
         run: |
-          mkdir -p dist
+          set -e
+          echo "== build tree =="
+          find build -name 'libSoundPhysicsLite.so' -o -name 'SPL.levipack' | sort
 
-          if [ -f package.sh ]; then
-            chmod +x package.sh
-            ./package.sh
-          else
-            echo "package.sh not found."
-            echo "Creating fallback package..."
-
-            cp manifest.json dist/
-
-            if [ -d config ]; then
-              cp -r config dist/
-            fi
-
-            if [ -d build ]; then
-              cp -r build dist/
-            fi
-
-            cd dist
-            zip -r ../SoundPhysicsLite.levipack .
-            cd ..
+          SO=$(find build -name 'libSoundPhysicsLite.so' | head -n1)
+          if [ -z "$SO" ]; then
+            echo "::error::libSoundPhysicsLite.so was not produced. Compilation failed or wrong target name."
+            exit 1
           fi
 
-      - name: Find LEVIPACK
-        if: always()
-        run: |
-          echo "=== LEVIPACK ==="
-          find . -type f -name "*.levipack" -print
+          echo "Checking ELF architecture:"
+          file "$SO"
+          file "$SO" | grep -qi 'ARM aarch64\|ARM64\|aarch64' || {
+            echo "::error::libSoundPhysicsLite.so is not ARM aarch64"
+            file "$SO"
+            exit 1
+          }
 
-      - name: Upload LEVIPACK
+          PACK=$(find build -name 'SPL.levipack' | head -n1)
+          if [ -z "$PACK" ]; then
+            echo "SPL.levipack missing — packaging manually"
+            mkdir -p pack
+            cp "$SO" pack/libSoundPhysicsLite.so
+            cp manifest.json pack/
+            cp icon.png pack/
+            (cd pack && zip -r ../SPL.levipack manifest.json libSoundPhysicsLite.so icon.png)
+            PACK="$PWD/SPL.levipack"
+          fi
+
+          echo "pack=$PACK" >> "$GITHUB_OUTPUT"
+          echo "so=$SO" >> "$GITHUB_OUTPUT"
+          unzip -l "$PACK"
+
+      - name: Upload SPL.levipack
         uses: actions/upload-artifact@v4
         with:
-          name: SoundPhysicsLite-ARM64
-          path: "**/*.levipack"
+          name: SPL-levipack-arm64
+          path: ${{ steps.outs.outputs.pack }}
           if-no-files-found: error
