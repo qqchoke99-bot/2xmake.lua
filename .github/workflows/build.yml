@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install build tools
@@ -32,26 +32,26 @@ jobs:
           sdkmanager "platforms;android-26"
           sdkmanager "ndk;27.2.12479018"
 
-      - name: Set Android NDK
+      - name: Set NDK environment
         run: |
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_LATEST_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
-      - name: Check project structure
+      - name: Verify project
         run: |
-          echo "=== Project structure ==="
+          echo "=== Project files ==="
           find . -maxdepth 3 -type f | sort
 
-          echo "=== Required files ==="
+          echo "=== Checking required files ==="
           test -f CMakeLists.txt
           test -f manifest.json
           test -d src
 
           echo "Project structure OK"
 
-      - name: Check Android NDK
+      - name: Verify NDK
         run: |
-          echo "NDK: $ANDROID_NDK_HOME"
+          echo "NDK = $ANDROID_NDK_HOME"
           "$ANDROID_NDK_HOME/ndk-build" --version
 
       - name: Configure CMake
@@ -73,12 +73,6 @@ jobs:
             --config Release \
             --parallel
 
-      - name: Show build output
-        if: always()
-        run: |
-          echo "=== Build directory ==="
-          find build -type f -print 2>/dev/null || true
-
       - name: Package LEVIPACK
         run: |
           mkdir -p dist
@@ -87,7 +81,8 @@ jobs:
             chmod +x package.sh
             ./package.sh
           else
-            echo "package.sh not found, creating fallback package..."
+            echo "package.sh not found."
+            echo "Creating fallback package..."
 
             cp manifest.json dist/
 
@@ -99,10 +94,6 @@ jobs:
               cp -r build dist/
             fi
 
-            if [ -d src ]; then
-              cp -r src dist/
-            fi
-
             cd dist
             zip -r ../SoundPhysicsLite.levipack .
             cd ..
@@ -111,7 +102,7 @@ jobs:
       - name: Find LEVIPACK
         if: always()
         run: |
-          echo "=== LEVIPACK files ==="
+          echo "=== LEVIPACK ==="
           find . -type f -name "*.levipack" -print
 
       - name: Upload LEVIPACK
