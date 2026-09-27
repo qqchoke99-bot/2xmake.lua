@@ -3,7 +3,7 @@
   "name": "Sound Physics Lite",
   "author": "Ported for Levi",
   "description": "MVP FMOD lowpass after play path 0x110CB1D0 (Channel* +0x78)",
-  "version": "0.8.0-mvp-1.26.51",
+  "version": "0.9.0-reverb-1.26.51",
   "entry": "libSoundPhysicsLite.so",
   "icon": "icon.png",
   "minecraft_versions": ["1.26.*"],
