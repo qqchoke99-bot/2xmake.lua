@@ -2,20 +2,44 @@ name: Build SoundPhysicsLite
 
 on:
   push:
-    branches: ["main"]
+    branches:
+      - main
+
   pull_request:
-    branches: ["main"]
+    branches:
+      - main
+
   workflow_dispatch:
 
 jobs:
   build:
+    name: Build LEVIPACK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source
+      # 1. Download repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build tools
+      # 2. Show project structure
+      - name: Check project structure
+        run: |
+          echo "=== Project root ==="
+          pwd
+          echo
+          echo "=== Files ==="
+          find . -maxdepth 3 -type f | sort
+          echo
+          echo "=== CMakeLists.txt ==="
+          if [ -f CMakeLists.txt ]; then
+            echo "Found CMakeLists.txt"
+          else
+            echo "ERROR: CMakeLists.txt not found in repository root!"
+            exit 1
+          fi
+
+      # 3. Install build tools
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -24,26 +48,48 @@ jobs:
             clang \
             zip
 
+      # 4. Configure CMake
       - name: Configure CMake
         run: |
-          cmake -S . -B build \
+          cmake \
+            -S . \
+            -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build
+      # 5. Build
+      - name: Build SoundPhysicsLite
         run: |
-          cmake --build build --config Release
+          cmake --build build --config Release --parallel
 
-      - name: Package LEVIPACK
+      # 6. Check build output
+      - name: Check build output
         run: |
-          chmod +x package.sh
-          ./package.sh
+          echo "=== Build directory ==="
+          find build -maxdepth 4 -type f | sort || true
 
+      # 7. Package
+      - name: Package SoundPhysicsLite
+        run: |
+          if [ -f package.sh ]; then
+            chmod +x package.sh
+            ./package.sh
+          else
+            echo "package.sh not found."
+            echo "Skipping package.sh."
+          fi
+
+      # 8. Find LEVIPACK
+      - name: Find LEVIPACK
+        run: |
+          echo "=== Searching for .levipack ==="
+          find . -type f -name "*.levipack" -print
+
+      # 9. Upload build artifact
       - name: Upload LEVIPACK
         uses: actions/upload-artifact@v4
         with:
-          name: SoundPhysicsLite
+          name: SoundPhysicsLite-levipack
           path: |
-            *.levipack
-            build/*.levipack
-            dist/*.levipack
+            **/*.levipack
+          if-no-files-found: error
