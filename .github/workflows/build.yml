@@ -26,17 +26,33 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Setup Android NDK
-        uses: android-actions/setup-ndk@v3
-        with:
-          ndk-version: r27c
-
-      - name: Check project
+      - name: Install Android NDK
         run: |
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-26"
+          sdkmanager "ndk;27.2.12479018"
+
+      - name: Set Android NDK
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_LATEST_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Check project structure
+        run: |
+          echo "=== Project structure ==="
+          find . -maxdepth 3 -type f | sort
+
+          echo "=== Required files ==="
           test -f CMakeLists.txt
           test -f manifest.json
           test -d src
+
           echo "Project structure OK"
+
+      - name: Check Android NDK
+        run: |
+          echo "NDK: $ANDROID_NDK_HOME"
+          "$ANDROID_NDK_HOME/ndk-build" --version
 
       - name: Configure CMake
         run: |
@@ -45,22 +61,34 @@ jobs:
             -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID=1 \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-26
 
       - name: Build
         run: |
-          cmake --build build --config Release --parallel
+          cmake \
+            --build build \
+            --config Release \
+            --parallel
 
-      - name: Package
+      - name: Show build output
+        if: always()
         run: |
+          echo "=== Build directory ==="
+          find build -type f -print 2>/dev/null || true
+
+      - name: Package LEVIPACK
+        run: |
+          mkdir -p dist
+
           if [ -f package.sh ]; then
             chmod +x package.sh
             ./package.sh
           else
-            mkdir -p dist
+            echo "package.sh not found, creating fallback package..."
+
             cp manifest.json dist/
 
             if [ -d config ]; then
@@ -71,17 +99,20 @@ jobs:
               cp -r build dist/
             fi
 
+            if [ -d src ]; then
+              cp -r src dist/
+            fi
+
             cd dist
             zip -r ../SoundPhysicsLite.levipack .
+            cd ..
           fi
 
-      - name: Show output
+      - name: Find LEVIPACK
         if: always()
         run: |
-          echo "=== Build output ==="
-          find build -type f 2>/dev/null || true
-          echo "=== LEVIPACK ==="
-          find . -name "*.levipack" -type f
+          echo "=== LEVIPACK files ==="
+          find . -type f -name "*.levipack" -print
 
       - name: Upload LEVIPACK
         uses: actions/upload-artifact@v4
