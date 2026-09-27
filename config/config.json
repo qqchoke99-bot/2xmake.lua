@@ -1,11 +1,15 @@
 {
   "enabled": true,
-  "debug_logging": true,
   "attenuation_factor": 1.0,
-  "max_distance": 48.0,
-  "min_volume": 0.05,
-  "pitch_drop": 0.08,
-  "muffling": 0.5,
-  "enable_muffling": true,
-  "enable_pitch": true
+  "reverb_gain": 1.0,
+  "reverb_brightness": 0.7,
+  "max_occlusion": 0.9,
+  "occlusion_variation": true,
+  "environment_evaluation_ray_count": 16,
+  "environment_evaluation_ray_bounces": 2,
+  "max_sound_processing_distance": 64.0,
+  "sound_direction_evaluation": true,
+  "update_moving_sounds": false,
+  "sound_update_interval": 5,
+  "debug_logging": false
 }
