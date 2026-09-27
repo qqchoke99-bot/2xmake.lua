@@ -24,36 +24,29 @@ static uintptr_t getPeBase() {
 
 static void* g_orig = nullptr;
 
-// Entry of function at 0x110CB1D0: x0 = this (object that stores Channel* at +0x78)
 static void hook_PlayPath(void* self) {
     using Fn = void (*)(void*);
-    if (g_orig) {
-        reinterpret_cast<Fn>(g_orig)(self);
-    }
+    if (g_orig) reinterpret_cast<Fn>(g_orig)(self);
     if (!self) return;
     void* channel =
         *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(self) + pe::kOffChannel);
-    if (channel) {
-        SoundPhysicsLite::instance().onChannelReady(channel);
-    }
+    if (channel) SoundPhysicsLite::instance().onChannelReady(channel);
 }
 
 bool SoundPhysicsLite::load() {
-    SPL_LOGI("Sound Physics Lite v0.8-MVP load");
-    SPL_LOGI("hook body offset 0x%lx channel field +0x%lx", (unsigned long)pe::kFnPlayPath,
-             (unsigned long)pe::kOffChannel);
+    SPL_LOGI("Sound Physics Lite v0.9-reverb load");
+    SPL_LOGI("hook 0x%lx  channel+0x%lx  lp=%.2f  reverb_wet=%.2f",
+             (unsigned long)pe::kFnPlayPath, (unsigned long)pe::kOffChannel,
+             mLowpassGain, mReverbWet);
     loadFmod();
     return true;
 }
 
-bool SoundPhysicsLite::enable() {
-    return installHook();
-}
+bool SoundPhysicsLite::enable() { return installHook(); }
 
 bool SoundPhysicsLite::disable() {
     if (mHooked) {
         void* target = reinterpret_cast<void*>(getPeBase() + pe::kFnPlayPath);
-        // pl::memory::unhook(target, detour) per CameraOverhaul / preloader API
         pl::memory::unhook(target, reinterpret_cast<void*>(&hook_PlayPath));
         mHooked = false;
         SPL_LOGI("unhooked");
@@ -68,40 +61,59 @@ bool SoundPhysicsLite::loadFmod() {
         SPL_LOGW("libfmod.so not found");
         return false;
     }
+
+    auto R = [&](const char* a, const char* b) -> void* {
+        void* p = dlsym(mFmod, a);
+        return p ? p : (b ? dlsym(mFmod, b) : nullptr);
+    };
+
     mSetLPGain = reinterpret_cast<FN_SetLowPassGain>(
-        dlsym(mFmod, "FMOD_Channel_SetLowPassGain"));
-    if (!mSetLPGain) {
-        mSetLPGain = reinterpret_cast<FN_SetLowPassGain>(
-            dlsym(mFmod, "FMOD5_Channel_SetLowPassGain"));
-    }
-    SPL_LOGI("SetLowPassGain=%p", (void*)mSetLPGain);
-    return mSetLPGain != nullptr;
+        R("FMOD_Channel_SetLowPassGain", "FMOD5_Channel_SetLowPassGain"));
+    mSetReverb = reinterpret_cast<FN_SetReverbProps>(
+        R("FMOD_Channel_SetReverbProperties", "FMOD5_Channel_SetReverbProperties"));
+
+    SPL_LOGI("SetLowPassGain=%p SetReverbProperties=%p",
+             (void*)mSetLPGain, (void*)mSetReverb);
+    return mSetLPGain != nullptr || mSetReverb != nullptr;
 }
 
 void SoundPhysicsLite::onChannelReady(void* channel) {
-    if (!mEnabled || !channel || !mSetLPGain) return;
-    mSetLPGain(channel, mLowpassGain);
-    SPL_LOGI("lowpass ch=%p gain=%.2f", channel, mLowpassGain);
+    if (!mEnabled || !channel) return;
+
+    if (mEnableLowpass && mSetLPGain) {
+        mSetLPGain(channel, mLowpassGain);
+    }
+
+    // MVP reverb: wet mix on channel reverb instance 0
+    // (Needs FMOD system reverb slot to be active; if silent, SetReverb may no-op)
+    if (mEnableReverb && mSetReverb) {
+        FMOD_RESULT r = mSetReverb(channel, mReverbInstance, mReverbWet);
+        if (mEnabled) {
+            SPL_LOGI("fx ch=%p lp=%.2f reverb_wet=%.2f inst=%d res=%d",
+                     channel, mLowpassGain, mReverbWet, mReverbInstance, (int)r);
+        }
+    } else if (mEnableLowpass) {
+        SPL_LOGI("fx ch=%p lp=%.2f (no reverb API)", channel, mLowpassGain);
+    }
 }
 
 bool SoundPhysicsLite::installHook() {
     if (mHooked) return true;
     uintptr_t base = getPeBase();
     if (!base) {
-        SPL_LOGW("libminecraftpe.so base not found");
+        SPL_LOGW("libminecraftpe base not found");
         return false;
     }
     void* target = reinterpret_cast<void*>(base + pe::kFnPlayPath);
-    void* detour = reinterpret_cast<void*>(&hook_PlayPath);
-    // HookPriority::Normal = 200 (CameraOverhaul used 0xc8)
-    const auto pri = pl::memory::HookPriority::Normal;
-    const bool ok = pl::memory::hook(target, detour, &g_orig, pri);
+    const bool ok = pl::memory::hook(
+        target, reinterpret_cast<void*>(&hook_PlayPath), &g_orig,
+        pl::memory::HookPriority::Normal);
     if (!ok) {
-        SPL_LOGW("pl::memory::hook failed target=%p", target);
+        SPL_LOGW("hook failed %p", target);
         return false;
     }
     mHooked = true;
-    SPL_LOGI("hooked 0x110CB1D0 abs=%p orig=%p", target, g_orig);
+    SPL_LOGI("hooked abs=%p orig=%p", target, g_orig);
     return true;
 }
 
