@@ -1,1 +1,11 @@
-
+{
+  "enabled": true,
+  "debug_logging": true,
+  "attenuation_factor": 1.0,
+  "max_distance": 48.0,
+  "min_volume": 0.05,
+  "pitch_drop": 0.08,
+  "muffling": 0.5,
+  "enable_muffling": true,
+  "enable_pitch": true
+}

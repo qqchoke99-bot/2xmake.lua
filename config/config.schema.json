@@ -1,0 +1,100 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enable Sound Physics",
+      "description": "Master switch for all sound effects",
+      "default": true
+    },
+    "attenuation_factor": {
+      "type": "number",
+      "title": "Attenuation Factor",
+      "description": "How quiet distant sounds become. 1.0 = physically correct. Lower = louder distant sounds",
+      "minimum": 0.1,
+      "maximum": 2.0,
+      "default": 1.0
+    },
+    "reverb_gain": {
+      "type": "number",
+      "title": "Reverb Gain",
+      "description": "Overall volume of reverb effect",
+      "minimum": 0.0,
+      "maximum": 2.0,
+      "default": 1.0
+    },
+    "reverb_brightness": {
+      "type": "number",
+      "title": "Reverb Brightness",
+      "description": "High frequency content of reverb (0 = dark, 1 = bright)",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.7
+    },
+    "max_occlusion": {
+      "type": "number",
+      "title": "Max Occlusion",
+      "description": "Maximum amount of sound that can be blocked by walls",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.9
+    },
+    "occlusion_variation": {
+      "type": "boolean",
+      "title": "Occlusion Variation",
+      "description": "Use multiple rays for more accurate occlusion instead of single ray",
+      "default": true
+    },
+    "environment_evaluation_ray_count": {
+      "type": "integer",
+      "title": "Environment Ray Count",
+      "description": "Number of rays used to evaluate the environment (higher = better quality, more lag)",
+      "minimum": 4,
+      "maximum": 64,
+      "default": 16
+    },
+    "environment_evaluation_ray_bounces": {
+      "type": "integer",
+      "title": "Ray Bounces",
+      "description": "How many times rays bounce for reverb calculation",
+      "minimum": 0,
+      "maximum": 4,
+      "default": 2
+    },
+    "max_sound_processing_distance": {
+      "type": "number",
+      "title": "Max Processing Distance",
+      "description": "Sounds farther than this (blocks) will not be processed",
+      "minimum": 16.0,
+      "maximum": 128.0,
+      "default": 64.0
+    },
+    "sound_direction_evaluation": {
+      "type": "boolean",
+      "title": "Sound Direction Evaluation",
+      "description": "Try to calculate where the sound should come from based on reflections",
+      "default": true
+    },
+    "update_moving_sounds": {
+      "type": "boolean",
+      "title": "Update Moving Sounds",
+      "description": "Frequently re-evaluate long sounds (music discs, etc.)",
+      "default": false
+    },
+    "sound_update_interval": {
+      "type": "integer",
+      "title": "Sound Update Interval",
+      "description": "Ticks between re-evaluation of moving sounds (only if Update Moving Sounds is on)",
+      "minimum": 1,
+      "maximum": 40,
+      "default": 5
+    },
+    "debug_logging": {
+      "type": "boolean",
+      "title": "Debug Logging",
+      "description": "Enable detailed logs (for development)",
+      "default": false
+    }
+  }
+}
