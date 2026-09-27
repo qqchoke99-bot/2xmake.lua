@@ -1,0 +1,49 @@
+name: Build SoundPhysicsLite
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            clang \
+            zip
+
+      - name: Configure CMake
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: |
+          cmake --build build --config Release
+
+      - name: Package LEVIPACK
+        run: |
+          chmod +x package.sh
+          ./package.sh
+
+      - name: Upload LEVIPACK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoundPhysicsLite
+          path: |
+            *.levipack
+            build/*.levipack
+            dist/*.levipack
