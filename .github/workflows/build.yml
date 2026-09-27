@@ -4,11 +4,9 @@ on:
   push:
     branches:
       - main
-
   pull_request:
     branches:
       - main
-
   workflow_dispatch:
 
 jobs:
@@ -17,84 +15,29 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # --------------------------------------------------
-      # Checkout
-      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # Check project structure
-      # --------------------------------------------------
-      - name: Check project structure
-        run: |
-          echo "================================"
-          echo "SoundPhysicsLite"
-          echo "Project structure"
-          echo "================================"
-
-          pwd
-
-          echo
-          echo "Files:"
-          find . -maxdepth 4 -type f | sort
-
-          echo
-          echo "Checking required files..."
-
-          test -f CMakeLists.txt \
-            || { echo "ERROR: CMakeLists.txt not found"; exit 1; }
-
-          test -f manifest.json \
-            || { echo "ERROR: manifest.json not found"; exit 1; }
-
-          test -d src \
-            || { echo "ERROR: src directory not found"; exit 1; }
-
-          echo "All required files found."
-
-      # --------------------------------------------------
-      # Install Linux build tools
-      # --------------------------------------------------
-      - name: Install build dependencies
+      - name: Install build tools
         run: |
           sudo apt-get update
+          sudo apt-get install -y cmake ninja-build zip
 
-          sudo apt-get install -y \
-            cmake \
-            ninja-build \
-            zip
-
-      # --------------------------------------------------
-      # Android SDK
-      # --------------------------------------------------
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # --------------------------------------------------
-      # Android NDK
-      # --------------------------------------------------
       - name: Setup Android NDK
         uses: android-actions/setup-ndk@v3
         with:
           ndk-version: r27c
 
-      # --------------------------------------------------
-      # Show Android environment
-      # --------------------------------------------------
-      - name: Check Android environment
+      - name: Check project
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-          echo "ANDROID_NDK_LATEST_HOME=$ANDROID_NDK_LATEST_HOME"
+          test -f CMakeLists.txt
+          test -f manifest.json
+          test -d src
+          echo "Project structure OK"
 
-          echo
-          echo "NDK:"
-          ls -la "$ANDROID_NDK_LATEST_HOME"
-
-      # --------------------------------------------------
-      # Configure CMake for Android ARM64
-      # --------------------------------------------------
       - name: Configure CMake
         run: |
           cmake \
@@ -107,124 +50,42 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-26
 
-      # --------------------------------------------------
-      # Build
-      # --------------------------------------------------
-      - name: Build SoundPhysicsLite
+      - name: Build
         run: |
-          cmake \
-            --build build \
-            --config Release \
-            --parallel
+          cmake --build build --config Release --parallel
 
-      # --------------------------------------------------
-      # Show build output
-      # --------------------------------------------------
-      - name: Inspect build output
-        if: always()
-        run: |
-          echo "================================"
-          echo "Build output"
-          echo "================================"
-
-          find build -maxdepth 6 -type f | sort || true
-
-      # --------------------------------------------------
-      # Package LEVIPACK
-      # --------------------------------------------------
-      - name: Package SoundPhysicsLite
+      - name: Package
         run: |
           if [ -f package.sh ]; then
             chmod +x package.sh
             ./package.sh
           else
-            echo "WARNING: package.sh not found."
-            echo "Creating fallback package..."
-
             mkdir -p dist
-
-            if [ -f manifest.json ]; then
-              cp manifest.json dist/
-            fi
+            cp manifest.json dist/
 
             if [ -d config ]; then
               cp -r config dist/
             fi
 
             if [ -d build ]; then
-              mkdir -p dist/build
-              cp -r build/* dist/build/ || true
+              cp -r build dist/
             fi
 
             cd dist
             zip -r ../SoundPhysicsLite.levipack .
-            cd ..
           fi
 
-      # --------------------------------------------------
-      # Find final package
-      # --------------------------------------------------
-      - name: Find LEVIPACK
+      - name: Show output
+        if: always()
         run: |
-          echo "================================"
-          echo "LEVIPACK files"
-          echo "================================"
+          echo "=== Build output ==="
+          find build -type f 2>/dev/null || true
+          echo "=== LEVIPACK ==="
+          find . -name "*.levipack" -type f
 
-          find . \
-            -type f \
-            \( -name "*.levipack" -o -name "*.zip" \) \
-            -print
-
-      # --------------------------------------------------
-      # Upload artifact
-      # --------------------------------------------------
-      - name: Upload SoundPhysicsLite
+      - name: Upload LEVIPACK
         uses: actions/upload-artifact@v4
         with:
           name: SoundPhysicsLite-ARM64
-          path: |
-            **/*.levipack
-            **/*.so
+          path: "**/*.levipack"
           if-no-files-found: error
-
-จากนั้นทำแค่นี้
-
-GitHub
-  ↓
-.github
-  ↓
-workflows
-  ↓
-build.yml
-  ↓
-Edit
-  ↓
-ลบทั้งหมด
-  ↓
-วางโค้ดด้านบน
-  ↓
-Commit changes
-
-แล้วไป:
-
-Actions → Build SoundPhysicsLite → Run workflow → Run workflow
-
-คราวนี้มันจะไม่ใช้:
-
-/usr/bin/c++
-
-เป็นตัว build หลักแบบครั้งก่อน แต่จะตั้ง:
-
-Android NDK
-    ↓
-ARM64 (arm64-v8a)
-    ↓
-CMake Android Toolchain
-    ↓
-SoundPhysicsLite
-
-และตรงกับ error ที่โปรเจกต์บอกว่า:
-
-ANDROID=1
-
-ถ้ารอบนี้ยัง Error อย่าเปลี่ยน workflow เองอีกครับ 😭 ส่งตั้งแต่บรรทัด "Configure CMake" ที่ error มาให้ผม แล้วเราจะแก้จาก error จริงต่อไปทีละจุด.
