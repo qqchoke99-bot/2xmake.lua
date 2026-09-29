@@ -44,36 +44,33 @@ bool SoundPhysicsLite::loadFmod() {
 }
 
 bool SoundPhysicsLite::resolveSetVolume() {
-    if (mSetVolumeTarget) return true;
+    // Always re-scan candidates; pick first that exists in maps
     if (!loadFmod()) return false;
 
-    // Prefer C API then C++ mangled — runtime resolve, no file offset
+    // Order matters: game imports C++ ChannelControl::setVolume (from pe PLT)
     const char* names[] = {
+        "_ZN4FMOD14ChannelControl9setVolumeEf", // C++ — preferred
         "FMOD_Channel_SetVolume",
         "FMOD5_Channel_SetVolume",
-        "_ZN4FMOD14ChannelControl9setVolumeEf",
+        "_ZN4FMOD7Channel9setVolumeEf",
         nullptr,
     };
-    void* p = nullptr;
-    const char* used = nullptr;
+
     for (int i = 0; names[i]; ++i) {
-        p = dlsym(mFmod, names[i]);
-        if (p) {
-            used = names[i];
-            break;
+        void* p = dlsym(mFmod, names[i]);
+        SPL_LOGI("dlsym %s -> %p", names[i], p);
+        if (!p) continue;
+        if (!addrInAnyMap(reinterpret_cast<uintptr_t>(p))) {
+            SPL_LOGW("%s %p not in maps", names[i], p);
+            continue;
         }
+        mSetVolumeTarget = p;
+        mSetVolumeName = names[i];
+        SPL_LOGE("resolved preferred setVolume %s @ %p", names[i], p);
+        return true;
     }
-    if (!p) {
-        SPL_LOGW("setVolume symbol not found in libfmod");
-        return false;
-    }
-    if (!addrInAnyMap(reinterpret_cast<uintptr_t>(p))) {
-        SPL_LOGW("setVolume %p not in maps", p);
-        return false;
-    }
-    mSetVolumeTarget = p;
-    SPL_LOGE("resolved setVolume %s @ %p", used, p);
-    return true;
+    SPL_LOGW("no setVolume symbol usable");
+    return false;
 }
 
 void SoundPhysicsLite::applyFx(void* channel) {
@@ -96,20 +93,14 @@ int SoundPhysicsLite::detour_SetVolume(void* channel, float volume) {
         self.applyFx(channel);
         static std::atomic<int> n{0};
         int c = ++n;
-        if (c <= 15) {
-            SPL_LOGE("FX setVol #%d ch=%p vol=%.2f r=%d", c, channel, volume, r);
+        if (c <= 30) {
+            SPL_LOGE("FX setVol #%d ch=%p vol=%.3f r=%d", c, channel, volume, r);
         }
     }
     return r;
 }
 
-bool SoundPhysicsLite::installHook() {
-    if (mHooked.load()) return true;
-    if (!resolveSetVolume()) return false;
-
-    void* target = mSetVolumeTarget;
-    SPL_LOGE("hook try libfmod setVolume target=%p", target);
-
+bool SoundPhysicsLite::tryHookAt(void* target, const char* name) {
     void* orig = nullptr;
     const bool ok = pl::memory::hook(
         target,
@@ -117,28 +108,64 @@ bool SoundPhysicsLite::installHook() {
         &orig,
         pl::memory::HookPriority::Normal);
 
-    // Some preloader builds set orig even when bool is false — accept non-null orig
+    SPL_LOGE("hook attempt name=%s target=%p ok=%d orig=%p", name, target, (int)ok, orig);
+
     if (!orig) {
-        SPL_LOGW("hook failed ok=%d orig=null", (int)ok);
+        SPL_LOGW("no trampoline for %s", name);
         return false;
     }
-    if (!ok) {
-        SPL_LOGW("hook ok=0 but orig=%p — using orig anyway", orig);
+
+    // Levi often returns ok=0 even when orig is set — treat orig as success signal
+    mOrigSetVolume = reinterpret_cast<FN_SetVolume>(orig);
+    mSetVolumeTarget = target;
+    mSetVolumeName = name;
+    mHooked.store(true);
+    SPL_LOGE("HOOKED %s target=%p orig=%p", name, target, orig);
+    return true;
+}
+
+bool SoundPhysicsLite::installHook() {
+    if (mHooked.load()) return true;
+    if (!loadFmod()) return false;
+
+    // Try every candidate until one yields a trampoline
+    const char* names[] = {
+        "_ZN4FMOD14ChannelControl9setVolumeEf",
+        "FMOD_Channel_SetVolume",
+        "FMOD5_Channel_SetVolume",
+        "_ZN4FMOD7Channel9setVolumeEf",
+        nullptr,
+    };
+
+    for (int i = 0; names[i]; ++i) {
+        void* p = dlsym(mFmod, names[i]);
+        if (!p) {
+            SPL_LOGI("skip missing %s", names[i]);
+            continue;
+        }
+        if (!addrInAnyMap(reinterpret_cast<uintptr_t>(p))) {
+            SPL_LOGW("skip not-in-maps %s %p", names[i], p);
+            continue;
+        }
+        if (tryHookAt(p, names[i])) {
+            return true;
+        }
+        // failed this symbol — try next (do not leave partial state)
+        mOrigSetVolume = nullptr;
+        mHooked.store(false);
     }
 
-    mOrigSetVolume = reinterpret_cast<FN_SetVolume>(orig);
-    mHooked.store(true);
-    SPL_LOGE("HOOKED libfmod setVolume target=%p orig=%p", target, orig);
-    return true;
+    SPL_LOGW("all setVolume hook candidates failed");
+    return false;
 }
 
 void* SoundPhysicsLite::retryThreadMain(void* arg) {
     auto* self = static_cast<SoundPhysicsLite*>(arg);
     SPL_LOGE("retry thread start");
-    for (int i = 0; i < 40 && !self->mStopRetry.load(); ++i) {
+    for (int i = 0; i < 45 && !self->mStopRetry.load(); ++i) {
         if (self->mHooked.load()) break;
         if (self->installHook()) {
-            SPL_LOGE("retry ok %d", i + 1);
+            SPL_LOGE("retry ok attempt %d", i + 1);
             break;
         }
         sleep(2);
@@ -159,7 +186,7 @@ void SoundPhysicsLite::startRetryThread() {
 }
 
 bool SoundPhysicsLite::load() {
-    SPL_LOGE("SPL v0.13-fmod LOAD (hook libfmod setVolume, not pe PLT)");
+    SPL_LOGE("SPL v0.14 LOAD (C++ setVolume first, multi-symbol)");
     loadFmod();
     installHook();
     startRetryThread();
@@ -180,7 +207,7 @@ bool SoundPhysicsLite::disable() {
         pl::memory::unhook(mSetVolumeTarget, reinterpret_cast<void*>(&detour_SetVolume));
         mHooked.store(false);
         mOrigSetVolume = nullptr;
-        SPL_LOGI("unhooked");
+        SPL_LOGI("unhooked %s", mSetVolumeName ? mSetVolumeName : "?");
     }
     return true;
 }

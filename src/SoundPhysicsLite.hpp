@@ -10,7 +10,6 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <dlfcn.h>
-#include <link.h>
 #include <android/log.h>
 
 #define SPL_TAG "SoundPhysicsLite"
@@ -18,7 +17,6 @@
 #define SPL_LOGW(...) __android_log_print(ANDROID_LOG_WARN, SPL_TAG, __VA_ARGS__)
 #define SPL_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, SPL_TAG, __VA_ARGS__)
 
-// AArch64: x0 = Channel*, s0 = volume → FMOD_RESULT
 using FN_SetVolume = int (*)(void* channel, float volume);
 using FN_SetLowPassGain = int (*)(void* channel, float gain);
 using FN_SetReverbProps = int (*)(void* channel, int instance, float wet);
@@ -40,14 +38,15 @@ private:
     pthread_t mRetryThread{};
     bool mRetryStarted = false;
 
-    float mLowpassGain = 0.80f;
-    float mReverbWet = 0.25f;
+    float mLowpassGain = 0.75f;
+    float mReverbWet = 0.30f;
     int mReverbInstance = 0;
     bool mEnableLowpass = true;
     bool mEnableReverb = true;
 
     void* mFmod = nullptr;
-    void* mSetVolumeTarget = nullptr; // real addr in libfmod
+    void* mSetVolumeTarget = nullptr;
+    const char* mSetVolumeName = nullptr;
     FN_SetVolume mOrigSetVolume = nullptr;
     FN_SetLowPassGain mSetLPGain = nullptr;
     FN_SetReverbProps mSetReverb = nullptr;
@@ -55,6 +54,7 @@ private:
     bool loadFmod();
     bool resolveSetVolume();
     static bool addrInAnyMap(uintptr_t addr);
+    bool tryHookAt(void* target, const char* name);
     bool installHook();
     void startRetryThread();
     static void* retryThreadMain(void* arg);
