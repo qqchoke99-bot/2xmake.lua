@@ -1,5 +1,4 @@
 #include "SoundPhysicsLite.hpp"
-#include <unistd.h>
 
 SoundPhysicsLite& SoundPhysicsLite::instance() {
     static SoundPhysicsLite i;
@@ -8,52 +7,187 @@ SoundPhysicsLite& SoundPhysicsLite::instance() {
 
 SoundPhysicsLite::SoundPhysicsLite() : mSelf(*ll::mod::NativeMod::current()) {}
 
-static uintptr_t scanPeBase() {
-    uintptr_t base = 0;
+bool SoundPhysicsLite::findPeMap(PeMap& out) {
+    out = {};
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) {
+        SPL_LOGW("cannot open /proc/self/maps");
+        return false;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        // need executable mapping of libminecraftpe.so
+        if (!strstr(line, "libminecraftpe.so")) continue;
+        if (!strstr(line, "r-x") && !strstr(line, "r-xp")) continue;
+        uintptr_t a = 0, b = 0;
+        if (sscanf(line, "%lx-%lx", &a, &b) == 2 && a && b > a) {
+            out.start = a;
+            out.end = b;
+            fclose(f);
+            SPL_LOGE("pe r-x map %p-%p", (void*)a, (void*)b);
+            return true;
+        }
+    }
+    fclose(f);
+    return false;
+}
 
-    // 1) Already loaded?
-    void* h = dlopen("libminecraftpe.so", RTLD_NOW | RTLD_NOLOAD);
-    if (h) {
-        // bias via dl_iterate still needed; keep handle
-        dlclose(h);
+bool SoundPhysicsLite::addrInMap(uintptr_t addr, const PeMap& m) {
+    return m.start && addr >= m.start && addr < m.end;
+}
+
+bool SoundPhysicsLite::loadFmod() {
+    if (mSetLPGain || mSetReverb) return true;
+    mFmod = dlopen("libfmod.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!mFmod) mFmod = dlopen("libfmod.so", RTLD_NOW);
+    if (!mFmod) {
+        SPL_LOGW("libfmod.so missing");
+        return false;
+    }
+    auto R = [&](const char* a, const char* b) -> void* {
+        void* p = dlsym(mFmod, a);
+        return p ? p : (b ? dlsym(mFmod, b) : nullptr);
+    };
+    mSetLPGain = reinterpret_cast<FN_SetLowPassGain>(
+        R("FMOD_Channel_SetLowPassGain", "FMOD5_Channel_SetLowPassGain"));
+    mSetReverb = reinterpret_cast<FN_SetReverbProps>(
+        R("FMOD_Channel_SetReverbProperties", "FMOD5_Channel_SetReverbProperties"));
+    SPL_LOGE("FMOD LP=%p REV=%p", (void*)mSetLPGain, (void*)mSetReverb);
+    return mSetLPGain || mSetReverb;
+}
+
+void SoundPhysicsLite::applyFx(void* channel) {
+    if (!channel) return;
+    loadFmod();
+    if (mEnableLowpass && mSetLPGain) {
+        mSetLPGain(channel, mLowpassGain);
+    }
+    if (mEnableReverb && mSetReverb) {
+        mSetReverb(channel, mReverbInstance, mReverbWet);
+    }
+}
+
+int SoundPhysicsLite::detour_PlaySound(void* sys, void* sound, void* group, int paused, void** outChannel) {
+    auto& self = SoundPhysicsLite::instance();
+    FN_PlaySound orig = self.mOrigPlaySound;
+    if (!orig) return 0;
+    // Call original once
+    int r = orig(sys, sound, group, paused, outChannel);
+    if (r == 0 && outChannel && *outChannel) {
+        self.applyFx(*outChannel);
+        static std::atomic<int> n{0};
+        int c = ++n;
+        if (c <= 20) {
+            SPL_LOGE("FX #%d ch=%p res=%d", c, *outChannel, r);
+        }
+    }
+    return r;
+}
+
+bool SoundPhysicsLite::installHook() {
+    if (mHooked.load()) return true;
+
+    PeMap map{};
+    if (!findPeMap(map)) {
+        SPL_LOGW("pe map not ready");
+        return false;
     }
 
+    // Runtime VA = map start is NOT always file base if first mapping is not offset 0.
+    // Prefer dl_iterate_phdr load bias for correct base+RVA.
+    uintptr_t bias = 0;
     dl_iterate_phdr(
         [](dl_phdr_info* info, size_t, void* data) -> int {
             if (!info->dlpi_name) return 0;
-            const char* n = info->dlpi_name;
-            // path may be full path; match substring
-            if (strstr(n, "libminecraftpe.so") || strstr(n, "minecraftpe")) {
-                *reinterpret_cast<uintptr_t*>(data) = static_cast<uintptr_t>(info->dlpi_addr);
-                SPL_LOGI("found pe name='%s' base=%p", n, (void*)info->dlpi_addr);
+            if (strstr(info->dlpi_name, "libminecraftpe.so")) {
+                *reinterpret_cast<uintptr_t*>(data) = (uintptr_t)info->dlpi_addr;
                 return 1;
             }
             return 0;
         },
-        &base);
+        &bias);
 
-    return base;
+    if (!bias) {
+        SPL_LOGW("pe bias 0");
+        return false;
+    }
+
+    uintptr_t target = bias + pe::kPltPlaySound;
+    if (!addrInMap(target, map)) {
+        // PLT may sit in a different segment; scan maps for any pe segment containing target
+        FILE* f = fopen("/proc/self/maps", "r");
+        bool ok = false;
+        if (f) {
+            char line[512];
+            while (fgets(line, sizeof(line), f)) {
+                if (!strstr(line, "libminecraftpe.so")) continue;
+                uintptr_t a = 0, b = 0;
+                if (sscanf(line, "%lx-%lx", &a, &b) == 2 && target >= a && target < b) {
+                    ok = true;
+                    break;
+                }
+            }
+            fclose(f);
+        }
+        if (!ok) {
+            SPL_LOGW("target %p not in any pe mapping (bias=%p)", (void*)target, (void*)bias);
+            return false;
+        }
+    }
+
+    SPL_LOGE("hook try target=%p bias=%p plt_off=0x%lx", (void*)target, (void*)bias,
+             (unsigned long)pe::kPltPlaySound);
+
+    void* orig = nullptr;
+    // CRITICAL: never call hook on invalid address — that was the crash
+    const bool ok = pl::memory::hook(
+        reinterpret_cast<void*>(target),
+        reinterpret_cast<void*>(&SoundPhysicsLite::detour_PlaySound),
+        &orig,
+        pl::memory::HookPriority::Normal);
+
+    if (!ok || !orig) {
+        SPL_LOGW("hook failed ok=%d orig=%p", (int)ok, orig);
+        return false;
+    }
+
+    mOrigPlaySound = reinterpret_cast<FN_PlaySound>(orig);
+    mHooked.store(true);
+    SPL_LOGE("HOOKED PLT playSound target=%p orig=%p", (void*)target, orig);
+    return true;
 }
 
-static void* g_orig = nullptr;
-static std::atomic<int> g_fxCount{0};
+void* SoundPhysicsLite::retryThreadMain(void* arg) {
+    auto* self = static_cast<SoundPhysicsLite*>(arg);
+    SPL_LOGE("retry thread start (safe)");
+    for (int i = 0; i < 40 && !self->mStopRetry.load(); ++i) {
+        if (self->mHooked.load()) break;
+        self->loadFmod();
+        if (self->installHook()) {
+            SPL_LOGE("retry ok attempt %d", i + 1);
+            break;
+        }
+        sleep(2);
+    }
+    if (!self->mHooked.load()) SPL_LOGW("retry gave up (no crash attempted on bad addr)");
+    return nullptr;
+}
 
-static void hook_PlayPath(void* self) {
-    using Fn = void (*)(void*);
-    if (g_orig) reinterpret_cast<Fn>(g_orig)(self);
-    if (!self) return;
-    void* channel =
-        *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(self) + pe::kOffChannel);
-    if (channel) SoundPhysicsLite::instance().onChannelReady(channel);
+void SoundPhysicsLite::startRetryThread() {
+    if (mRetryStarted || mHooked.load()) return;
+    mRetryStarted = true;
+    mStopRetry.store(false);
+    if (pthread_create(&mRetryThread, nullptr, &retryThreadMain, this) != 0) {
+        mRetryStarted = false;
+        return;
+    }
+    pthread_detach(mRetryThread);
 }
 
 bool SoundPhysicsLite::load() {
-    SPL_LOGE("SPL v0.10-retry LOAD (method C)");
-    SPL_LOGI("target offset=0x%lx channel+0x%lx lp=%.2f wet=%.2f",
-             (unsigned long)pe::kFnPlayPath, (unsigned long)pe::kOffChannel,
-             mLowpassGain, mReverbWet);
+    SPL_LOGE("SPL v0.11-safe LOAD (PLT playSound, no body hook)");
     loadFmod();
-    // Try once early; pe may not exist yet
+    // Do not force hook in load if pe missing — retry thread handles it
     installHook();
     startRetryThread();
     return true;
@@ -62,129 +196,33 @@ bool SoundPhysicsLite::load() {
 bool SoundPhysicsLite::enable() {
     SPL_LOGE("SPL ENABLE");
     loadFmod();
-    if (!installHook()) {
-        SPL_LOGW("enable: hook not ready, retry thread will keep trying");
-    }
+    installHook();
     startRetryThread();
-    return true; // don't fail mod load if pe not ready yet
+    return true;
 }
 
 bool SoundPhysicsLite::disable() {
     mStopRetry.store(true);
-    if (mHooked.load()) {
-        uintptr_t base = scanPeBase();
-        if (base) {
-            void* target = reinterpret_cast<void*>(base + pe::kFnPlayPath);
-            pl::memory::unhook(target, reinterpret_cast<void*>(&hook_PlayPath));
-            SPL_LOGI("unhooked");
+    if (mHooked.load() && mOrigPlaySound) {
+        uintptr_t bias = 0;
+        dl_iterate_phdr(
+            [](dl_phdr_info* info, size_t, void* data) -> int {
+                if (info->dlpi_name && strstr(info->dlpi_name, "libminecraftpe.so")) {
+                    *reinterpret_cast<uintptr_t*>(data) = (uintptr_t)info->dlpi_addr;
+                    return 1;
+                }
+                return 0;
+            },
+            &bias);
+        if (bias) {
+            void* target = reinterpret_cast<void*>(bias + pe::kPltPlaySound);
+            pl::memory::unhook(target, reinterpret_cast<void*>(&detour_PlaySound));
         }
         mHooked.store(false);
+        mOrigPlaySound = nullptr;
+        SPL_LOGI("unhooked");
     }
     return true;
-}
-
-bool SoundPhysicsLite::loadFmod() {
-    if (mSetLPGain || mSetReverb) return true;
-
-    mFmod = dlopen("libfmod.so", RTLD_NOW | RTLD_NOLOAD);
-    if (!mFmod) mFmod = dlopen("libfmod.so", RTLD_NOW);
-    if (!mFmod) {
-        SPL_LOGW("libfmod.so not found (will retry)");
-        return false;
-    }
-
-    auto R = [&](const char* a, const char* b) -> void* {
-        void* p = dlsym(mFmod, a);
-        return p ? p : (b ? dlsym(mFmod, b) : nullptr);
-    };
-
-    mSetLPGain = reinterpret_cast<FN_SetLowPassGain>(
-        R("FMOD_Channel_SetLowPassGain", "FMOD5_Channel_SetLowPassGain"));
-    mSetReverb = reinterpret_cast<FN_SetReverbProps>(
-        R("FMOD_Channel_SetReverbProperties", "FMOD5_Channel_SetReverbProperties"));
-
-    SPL_LOGE("FMOD ready LP=%p REV=%p", (void*)mSetLPGain, (void*)mSetReverb);
-    return mSetLPGain != nullptr || mSetReverb != nullptr;
-}
-
-void SoundPhysicsLite::onChannelReady(void* channel) {
-    if (!mEnabled || !channel) return;
-    loadFmod();
-
-    if (mEnableLowpass && mSetLPGain) {
-        mSetLPGain(channel, mLowpassGain);
-    }
-    if (mEnableReverb && mSetReverb) {
-        mSetReverb(channel, mReverbInstance, mReverbWet);
-    }
-
-    int n = ++g_fxCount;
-    // Log first 30 hits so it's obvious when effect path runs
-    if (n <= 30) {
-        SPL_LOGE("FX #%d ch=%p lp=%.2f wet=%.2f", n, channel, mLowpassGain, mReverbWet);
-    }
-}
-
-bool SoundPhysicsLite::installHook() {
-    if (mHooked.load()) return true;
-
-    uintptr_t base = scanPeBase();
-    if (!base) {
-        SPL_LOGW("pe base not found yet");
-        return false;
-    }
-
-    void* target = reinterpret_cast<void*>(base + pe::kFnPlayPath);
-    SPL_LOGI("try hook target=%p (base=%p + 0x%lx)", target, (void*)base,
-             (unsigned long)pe::kFnPlayPath);
-
-    void* orig = nullptr;
-    const bool ok = pl::memory::hook(
-        target, reinterpret_cast<void*>(&hook_PlayPath), &orig,
-        pl::memory::HookPriority::Normal);
-    if (!ok || !orig) {
-        // some builds return bool; orig may still be set
-        if (!ok) {
-            SPL_LOGW("pl::memory::hook returned false target=%p", target);
-            return false;
-        }
-    }
-    g_orig = orig;
-    mHooked.store(true);
-    SPL_LOGE("HOOKED OK target=%p orig=%p", target, g_orig);
-    return true;
-}
-
-void* SoundPhysicsLite::retryThreadMain(void* arg) {
-    auto* self = static_cast<SoundPhysicsLite*>(arg);
-    SPL_LOGE("retry thread start");
-    // ~60s of retries: every 2s
-    for (int i = 0; i < 30 && !self->mStopRetry.load(); ++i) {
-        if (self->mHooked.load()) break;
-        self->loadFmod();
-        if (self->installHook()) {
-            SPL_LOGE("retry success at attempt %d", i + 1);
-            break;
-        }
-        sleep(2);
-    }
-    if (!self->mHooked.load()) {
-        SPL_LOGW("retry gave up — pe never found or hook failed");
-    }
-    SPL_LOGI("retry thread end");
-    return nullptr;
-}
-
-void SoundPhysicsLite::startRetryThread() {
-    if (mRetryStarted || mHooked.load()) return;
-    mRetryStarted = true;
-    mStopRetry.store(false);
-    if (pthread_create(&mRetryThread, nullptr, &SoundPhysicsLite::retryThreadMain, this) != 0) {
-        SPL_LOGW("pthread_create failed");
-        mRetryStarted = false;
-        return;
-    }
-    pthread_detach(mRetryThread);
 }
 
 PL_REGISTER_MOD(SoundPhysicsLite, SoundPhysicsLite::instance())
