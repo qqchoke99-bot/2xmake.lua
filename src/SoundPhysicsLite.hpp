@@ -19,25 +19,14 @@
 #define SPL_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, SPL_TAG, __VA_ARGS__)
 
 namespace pe {
-    // File RVA (not runtime VA). From RE of libminecraftpe.so 1.26.51.
-    // PLT stub for FMOD::System::playSound — safe ABI (documented FMOD).
-    constexpr uintptr_t kPltPlaySound = 0x1298F5A0;
-    // Body of play-path (caller). DO NOT hook until signature fully RE'd.
-    // constexpr uintptr_t kFnPlayPath = 0x110CB1D0;
-    // Channel* stored at object+0x78 after playSound in that function.
-    // constexpr uintptr_t kOffChannel = 0x78;
+    // PLT: FMOD::ChannelControl::setVolume(float) — confirmed in libminecraftpe.so
+    constexpr uintptr_t kPltSetVolume = 0x1298F5B0;
 }
 
-// FMOD_RESULT System::playSound(Sound*, ChannelGroup*, bool, Channel**)
-// AArch64: x0=this(System*), x1=Sound*, x2=ChannelGroup*, w3=paused, x4=Channel**
-using FN_PlaySound = int (*)(void* sys, void* sound, void* group, int paused, void** outChannel);
+// AArch64: x0 = ChannelControl*, s0 = volume → FMOD_RESULT in w0
+using FN_SetVolume = int (*)(void* channel, float volume);
 using FN_SetLowPassGain = int (*)(void* channel, float gain);
 using FN_SetReverbProps = int (*)(void* channel, int instance, float wet);
-
-struct PeMap {
-    uintptr_t start = 0;
-    uintptr_t end = 0;
-};
 
 class SoundPhysicsLite {
 public:
@@ -56,8 +45,9 @@ private:
     pthread_t mRetryThread{};
     bool mRetryStarted = false;
 
-    float mLowpassGain = 0.45f;
-    float mReverbWet = 0.40f;
+    // Mild — must not kill sound (v0.11 playSound hook did)
+    float mLowpassGain = 0.80f;
+    float mReverbWet = 0.25f;
     int mReverbInstance = 0;
     bool mEnableLowpass = true;
     bool mEnableReverb = true;
@@ -65,14 +55,14 @@ private:
     void* mFmod = nullptr;
     FN_SetLowPassGain mSetLPGain = nullptr;
     FN_SetReverbProps mSetReverb = nullptr;
-    FN_PlaySound mOrigPlaySound = nullptr;
+    FN_SetVolume mOrigSetVolume = nullptr;
 
-    static bool findPeMap(PeMap& out);
-    static bool addrInMap(uintptr_t addr, const PeMap& m);
+    static uintptr_t peBias();
+    static bool targetInPeMaps(uintptr_t addr);
     bool loadFmod();
     bool installHook();
     void startRetryThread();
     static void* retryThreadMain(void* arg);
     void applyFx(void* channel);
-    static int detour_PlaySound(void* sys, void* sound, void* group, int paused, void** outChannel);
+    static int detour_SetVolume(void* channel, float volume);
 };
