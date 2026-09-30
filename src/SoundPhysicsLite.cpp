@@ -7,6 +7,16 @@ SoundPhysicsLite& SoundPhysicsLite::instance() {
 
 SoundPhysicsLite::SoundPhysicsLite() : mSelf(*ll::mod::NativeMod::current()) {}
 
+float SoundPhysicsLite::clampf(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+float SoundPhysicsLite::lerpf(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
 bool SoundPhysicsLite::addrInAnyMap(uintptr_t addr) {
     FILE* f = fopen("/proc/self/maps", "r");
     if (!f) return false;
@@ -24,7 +34,6 @@ bool SoundPhysicsLite::addrInAnyMap(uintptr_t addr) {
 }
 
 bool SoundPhysicsLite::loadFmod() {
-    if (mFmod && (mSetLPGain || mSetReverb || mSetOcclusion)) return true;
     if (!mFmod) {
         mFmod = dlopen("libfmod.so", RTLD_NOW | RTLD_NOLOAD);
         if (!mFmod) mFmod = dlopen("libfmod.so", RTLD_NOW);
@@ -37,6 +46,7 @@ bool SoundPhysicsLite::loadFmod() {
         void* p = dlsym(mFmod, a);
         return p ? p : (b ? dlsym(mFmod, b) : nullptr);
     };
+
     if (!mSetLPGain)
         mSetLPGain = reinterpret_cast<FN_SetLowPassGain>(
             R("FMOD_Channel_SetLowPassGain", "FMOD5_Channel_SetLowPassGain"));
@@ -46,27 +56,69 @@ bool SoundPhysicsLite::loadFmod() {
     if (!mSetOcclusion)
         mSetOcclusion = reinterpret_cast<FN_Set3DOcclusion>(
             R("FMOD_Channel_Set3DOcclusion", "FMOD5_Channel_Set3DOcclusion"));
-    SPL_LOGE("FMOD handle=%p LP=%p REV=%p OCC=%p", mFmod, (void*)mSetLPGain,
-             (void*)mSetReverb, (void*)mSetOcclusion);
+    if (!mGet3DAttr)
+        mGet3DAttr = reinterpret_cast<FN_Get3DAttributes>(
+            R("FMOD_Channel_Get3DAttributes", "FMOD5_Channel_Get3DAttributes"));
+    if (!mGetSystem)
+        mGetSystem = reinterpret_cast<FN_GetSystemObject>(
+            R("FMOD_Channel_GetSystemObject", "FMOD5_Channel_GetSystemObject"));
+    if (!mGetListener)
+        mGetListener = reinterpret_cast<FN_Get3DListenerAttributes>(
+            R("FMOD_System_Get3DListenerAttributes", "FMOD5_System_Get3DListenerAttributes"));
+
+    SPL_LOGE("FMOD h=%p LP=%p REV=%p OCC=%p G3D=%p GSys=%p GLis=%p", mFmod, (void*)mSetLPGain,
+             (void*)mSetReverb, (void*)mSetOcclusion, (void*)mGet3DAttr, (void*)mGetSystem,
+             (void*)mGetListener);
     return true;
 }
 
 void SoundPhysicsLite::applyFx(void* channel, float volume) {
-    if (!channel) return;
-    // Skip silent / fully faded channels
-    if (volume <= 0.001f) return;
+    if (!channel || volume <= 0.001f) return;
 
-    if (mEnableLowpass && mSetLPGain) {
-        mSetLPGain(channel, mLowpassGain);
+    float dist = -1.0f;
+    float t = 0.35f; // default mid if positions unavailable
+
+    if (mGet3DAttr) {
+        FMOD_VECTOR pos{}, vel{};
+        if (mGet3DAttr(channel, &pos, &vel) == 0) {
+            FMOD_VECTOR lpos{};
+            bool gotListener = false;
+            if (mGetSystem && mGetListener) {
+                void* sys = nullptr;
+                if (mGetSystem(channel, &sys) == 0 && sys) {
+                    FMOD_VECTOR lvel{}, fwd{}, up{};
+                    if (mGetListener(sys, 0, &lpos, &lvel, &fwd, &up) == 0) {
+                        gotListener = true;
+                    }
+                }
+            }
+            if (gotListener) {
+                float dx = pos.x - lpos.x;
+                float dy = pos.y - lpos.y;
+                float dz = pos.z - lpos.z;
+                dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                t = clampf(dist / mMaxDist, 0.0f, 1.0f);
+            }
+        }
     }
-    if (mEnableReverb && mSetReverb) {
-        mSetReverb(channel, mReverbInstance, mReverbWet);
-        // Try a couple more instances — some builds only wet on non-zero slot
-        mSetReverb(channel, 1, mReverbWet * 0.7f);
-        mSetReverb(channel, 2, mReverbWet * 0.4f);
+
+    const float lp = lerpf(mLowpassNear, mLowpassFar, t);
+    const float wet = lerpf(mReverbNear, mReverbFar, t);
+    const float occD = lerpf(mOccDirectNear, mOccDirectFar, t);
+    const float occR = lerpf(mOccReverbNear, mOccReverbFar, t);
+
+    if (mSetLPGain) mSetLPGain(channel, lp);
+    if (mSetReverb) {
+        mSetReverb(channel, 0, wet);
+        mSetReverb(channel, 1, wet * 0.65f);
     }
-    if (mEnableOcclusion && mSetOcclusion) {
-        mSetOcclusion(channel, mOcclusionDirect, mOcclusionReverb);
+    if (mSetOcclusion) mSetOcclusion(channel, occD, occR);
+
+    static std::atomic<int> n{0};
+    int c = ++n;
+    if (c <= 35) {
+        SPL_LOGE("FX v16 #%d vol=%.2f dist=%.1f t=%.2f lp=%.2f wet=%.2f occ=%.2f/%.2f", c, volume,
+                 dist, t, lp, wet, occD, occR);
     }
 }
 
@@ -76,15 +128,7 @@ int SoundPhysicsLite::detour_SetVolume(void* channel, float volume) {
     if (self.mOrigSetVolume) {
         r = self.mOrigSetVolume(channel, volume);
     }
-    if (channel) {
-        self.applyFx(channel, volume);
-        static std::atomic<int> n{0};
-        int c = ++n;
-        if (c <= 40 && volume > 0.001f) {
-            SPL_LOGE("FX HEAVY #%d ch=%p vol=%.3f r=%d lp=%.2f wet=%.2f", c, channel, volume, r,
-                     self.mLowpassGain, self.mReverbWet);
-        }
-    }
+    if (channel) self.applyFx(channel, volume);
     return r;
 }
 
@@ -97,12 +141,10 @@ bool SoundPhysicsLite::tryHookAt(void* target, const char* name) {
         pl::memory::HookPriority::Normal);
 
     SPL_LOGE("hook attempt name=%s target=%p ok=%d orig=%p", name, target, (int)ok, orig);
-
     if (!orig) {
         SPL_LOGW("no trampoline for %s", name);
         return false;
     }
-
     mOrigSetVolume = reinterpret_cast<FN_SetVolume>(orig);
     mSetVolumeTarget = target;
     mSetVolumeName = name;
@@ -115,47 +157,32 @@ bool SoundPhysicsLite::installHook() {
     if (mHooked.load()) return true;
     if (!loadFmod()) return false;
 
+    // Entry point only — do NOT hook playSound / 0x110CB1D0
     const char* names[] = {
         "_ZN4FMOD14ChannelControl9setVolumeEf",
         "FMOD_Channel_SetVolume",
         "FMOD5_Channel_SetVolume",
-        "_ZN4FMOD7Channel9setVolumeEf",
         nullptr,
     };
 
     for (int i = 0; names[i]; ++i) {
         void* p = dlsym(mFmod, names[i]);
-        if (!p) {
-            SPL_LOGI("skip missing %s", names[i]);
-            continue;
-        }
-        if (!addrInAnyMap(reinterpret_cast<uintptr_t>(p))) {
-            SPL_LOGW("skip not-in-maps %s %p", names[i], p);
-            continue;
-        }
-        if (tryHookAt(p, names[i])) {
-            return true;
-        }
+        if (!p || !addrInAnyMap(reinterpret_cast<uintptr_t>(p))) continue;
+        if (tryHookAt(p, names[i])) return true;
         mOrigSetVolume = nullptr;
         mHooked.store(false);
     }
-
-    SPL_LOGW("all setVolume hook candidates failed");
+    SPL_LOGW("setVolume hook failed");
     return false;
 }
 
 void* SoundPhysicsLite::retryThreadMain(void* arg) {
     auto* self = static_cast<SoundPhysicsLite*>(arg);
-    SPL_LOGE("retry thread start");
     for (int i = 0; i < 45 && !self->mStopRetry.load(); ++i) {
         if (self->mHooked.load()) break;
-        if (self->installHook()) {
-            SPL_LOGE("retry ok attempt %d", i + 1);
-            break;
-        }
+        if (self->installHook()) break;
         sleep(2);
     }
-    if (!self->mHooked.load()) SPL_LOGW("retry gave up");
     return nullptr;
 }
 
@@ -171,7 +198,7 @@ void SoundPhysicsLite::startRetryThread() {
 }
 
 bool SoundPhysicsLite::load() {
-    SPL_LOGE("SPL v0.15-HEAVY LOAD lp=0.35 wet=0.85 occ=0.45");
+    SPL_LOGE("SPL v0.16 LOAD (distance occlusion MVP, no playSound hook)");
     loadFmod();
     installHook();
     startRetryThread();
@@ -179,7 +206,7 @@ bool SoundPhysicsLite::load() {
 }
 
 bool SoundPhysicsLite::enable() {
-    SPL_LOGE("SPL ENABLE HEAVY");
+    SPL_LOGE("SPL ENABLE v16");
     loadFmod();
     installHook();
     startRetryThread();
@@ -192,7 +219,6 @@ bool SoundPhysicsLite::disable() {
         pl::memory::unhook(mSetVolumeTarget, reinterpret_cast<void*>(&detour_SetVolume));
         mHooked.store(false);
         mOrigSetVolume = nullptr;
-        SPL_LOGI("unhooked %s", mSetVolumeName ? mSetVolumeName : "?");
     }
     return true;
 }
