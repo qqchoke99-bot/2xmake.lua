@@ -24,9 +24,11 @@ bool SoundPhysicsLite::addrInAnyMap(uintptr_t addr) {
 }
 
 bool SoundPhysicsLite::loadFmod() {
-    if (mFmod) return true;
-    mFmod = dlopen("libfmod.so", RTLD_NOW | RTLD_NOLOAD);
-    if (!mFmod) mFmod = dlopen("libfmod.so", RTLD_NOW);
+    if (mFmod && (mSetLPGain || mSetReverb || mSetOcclusion)) return true;
+    if (!mFmod) {
+        mFmod = dlopen("libfmod.so", RTLD_NOW | RTLD_NOLOAD);
+        if (!mFmod) mFmod = dlopen("libfmod.so", RTLD_NOW);
+    }
     if (!mFmod) {
         SPL_LOGW("libfmod.so not loaded yet");
         return false;
@@ -35,51 +37,36 @@ bool SoundPhysicsLite::loadFmod() {
         void* p = dlsym(mFmod, a);
         return p ? p : (b ? dlsym(mFmod, b) : nullptr);
     };
-    mSetLPGain = reinterpret_cast<FN_SetLowPassGain>(
-        R("FMOD_Channel_SetLowPassGain", "FMOD5_Channel_SetLowPassGain"));
-    mSetReverb = reinterpret_cast<FN_SetReverbProps>(
-        R("FMOD_Channel_SetReverbProperties", "FMOD5_Channel_SetReverbProperties"));
-    SPL_LOGE("FMOD handle=%p LP=%p REV=%p", mFmod, (void*)mSetLPGain, (void*)mSetReverb);
+    if (!mSetLPGain)
+        mSetLPGain = reinterpret_cast<FN_SetLowPassGain>(
+            R("FMOD_Channel_SetLowPassGain", "FMOD5_Channel_SetLowPassGain"));
+    if (!mSetReverb)
+        mSetReverb = reinterpret_cast<FN_SetReverbProps>(
+            R("FMOD_Channel_SetReverbProperties", "FMOD5_Channel_SetReverbProperties"));
+    if (!mSetOcclusion)
+        mSetOcclusion = reinterpret_cast<FN_Set3DOcclusion>(
+            R("FMOD_Channel_Set3DOcclusion", "FMOD5_Channel_Set3DOcclusion"));
+    SPL_LOGE("FMOD handle=%p LP=%p REV=%p OCC=%p", mFmod, (void*)mSetLPGain,
+             (void*)mSetReverb, (void*)mSetOcclusion);
     return true;
 }
 
-bool SoundPhysicsLite::resolveSetVolume() {
-    // Always re-scan candidates; pick first that exists in maps
-    if (!loadFmod()) return false;
-
-    // Order matters: game imports C++ ChannelControl::setVolume (from pe PLT)
-    const char* names[] = {
-        "_ZN4FMOD14ChannelControl9setVolumeEf", // C++ — preferred
-        "FMOD_Channel_SetVolume",
-        "FMOD5_Channel_SetVolume",
-        "_ZN4FMOD7Channel9setVolumeEf",
-        nullptr,
-    };
-
-    for (int i = 0; names[i]; ++i) {
-        void* p = dlsym(mFmod, names[i]);
-        SPL_LOGI("dlsym %s -> %p", names[i], p);
-        if (!p) continue;
-        if (!addrInAnyMap(reinterpret_cast<uintptr_t>(p))) {
-            SPL_LOGW("%s %p not in maps", names[i], p);
-            continue;
-        }
-        mSetVolumeTarget = p;
-        mSetVolumeName = names[i];
-        SPL_LOGE("resolved preferred setVolume %s @ %p", names[i], p);
-        return true;
-    }
-    SPL_LOGW("no setVolume symbol usable");
-    return false;
-}
-
-void SoundPhysicsLite::applyFx(void* channel) {
+void SoundPhysicsLite::applyFx(void* channel, float volume) {
     if (!channel) return;
+    // Skip silent / fully faded channels
+    if (volume <= 0.001f) return;
+
     if (mEnableLowpass && mSetLPGain) {
         mSetLPGain(channel, mLowpassGain);
     }
     if (mEnableReverb && mSetReverb) {
         mSetReverb(channel, mReverbInstance, mReverbWet);
+        // Try a couple more instances — some builds only wet on non-zero slot
+        mSetReverb(channel, 1, mReverbWet * 0.7f);
+        mSetReverb(channel, 2, mReverbWet * 0.4f);
+    }
+    if (mEnableOcclusion && mSetOcclusion) {
+        mSetOcclusion(channel, mOcclusionDirect, mOcclusionReverb);
     }
 }
 
@@ -90,11 +77,12 @@ int SoundPhysicsLite::detour_SetVolume(void* channel, float volume) {
         r = self.mOrigSetVolume(channel, volume);
     }
     if (channel) {
-        self.applyFx(channel);
+        self.applyFx(channel, volume);
         static std::atomic<int> n{0};
         int c = ++n;
-        if (c <= 30) {
-            SPL_LOGE("FX setVol #%d ch=%p vol=%.3f r=%d", c, channel, volume, r);
+        if (c <= 40 && volume > 0.001f) {
+            SPL_LOGE("FX HEAVY #%d ch=%p vol=%.3f r=%d lp=%.2f wet=%.2f", c, channel, volume, r,
+                     self.mLowpassGain, self.mReverbWet);
         }
     }
     return r;
@@ -115,7 +103,6 @@ bool SoundPhysicsLite::tryHookAt(void* target, const char* name) {
         return false;
     }
 
-    // Levi often returns ok=0 even when orig is set — treat orig as success signal
     mOrigSetVolume = reinterpret_cast<FN_SetVolume>(orig);
     mSetVolumeTarget = target;
     mSetVolumeName = name;
@@ -128,7 +115,6 @@ bool SoundPhysicsLite::installHook() {
     if (mHooked.load()) return true;
     if (!loadFmod()) return false;
 
-    // Try every candidate until one yields a trampoline
     const char* names[] = {
         "_ZN4FMOD14ChannelControl9setVolumeEf",
         "FMOD_Channel_SetVolume",
@@ -150,7 +136,6 @@ bool SoundPhysicsLite::installHook() {
         if (tryHookAt(p, names[i])) {
             return true;
         }
-        // failed this symbol — try next (do not leave partial state)
         mOrigSetVolume = nullptr;
         mHooked.store(false);
     }
@@ -186,7 +171,7 @@ void SoundPhysicsLite::startRetryThread() {
 }
 
 bool SoundPhysicsLite::load() {
-    SPL_LOGE("SPL v0.14 LOAD (C++ setVolume first, multi-symbol)");
+    SPL_LOGE("SPL v0.15-HEAVY LOAD lp=0.35 wet=0.85 occ=0.45");
     loadFmod();
     installHook();
     startRetryThread();
@@ -194,7 +179,7 @@ bool SoundPhysicsLite::load() {
 }
 
 bool SoundPhysicsLite::enable() {
-    SPL_LOGE("SPL ENABLE");
+    SPL_LOGE("SPL ENABLE HEAVY");
     loadFmod();
     installHook();
     startRetryThread();

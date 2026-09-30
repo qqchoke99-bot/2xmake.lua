@@ -20,6 +20,7 @@
 using FN_SetVolume = int (*)(void* channel, float volume);
 using FN_SetLowPassGain = int (*)(void* channel, float gain);
 using FN_SetReverbProps = int (*)(void* channel, int instance, float wet);
+using FN_Set3DOcclusion = int (*)(void* channel, float direct, float reverb);
 
 class SoundPhysicsLite {
 public:
@@ -38,11 +39,15 @@ private:
     pthread_t mRetryThread{};
     bool mRetryStarted = false;
 
-    float mLowpassGain = 0.75f;
-    float mReverbWet = 0.30f;
+    // Heavy FX — still call original volume first
+    float mLowpassGain = 0.35f;      // was 0.75 — much more muffled
+    float mReverbWet = 0.85f;        // was 0.30 — strong wet
+    float mOcclusionDirect = 0.45f;  // optional if API exists
+    float mOcclusionReverb = 0.25f;
     int mReverbInstance = 0;
     bool mEnableLowpass = true;
     bool mEnableReverb = true;
+    bool mEnableOcclusion = true;
 
     void* mFmod = nullptr;
     void* mSetVolumeTarget = nullptr;
@@ -50,14 +55,14 @@ private:
     FN_SetVolume mOrigSetVolume = nullptr;
     FN_SetLowPassGain mSetLPGain = nullptr;
     FN_SetReverbProps mSetReverb = nullptr;
+    FN_Set3DOcclusion mSetOcclusion = nullptr;
 
     bool loadFmod();
-    bool resolveSetVolume();
     static bool addrInAnyMap(uintptr_t addr);
     bool tryHookAt(void* target, const char* name);
     bool installHook();
     void startRetryThread();
     static void* retryThreadMain(void* arg);
-    void applyFx(void* channel);
+    void applyFx(void* channel, float volume);
     static int detour_SetVolume(void* channel, float volume);
 };
